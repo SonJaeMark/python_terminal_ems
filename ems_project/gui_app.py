@@ -1,79 +1,224 @@
 import os
 import django
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk, messagebox
+from decimal import Decimal, InvalidOperation
 
-# 1. Initialize Django environment within the script
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'ems_project.settings')
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "ems_project.settings")
 django.setup()
 
-# Import model after django.setup()
+from django.db.models import Q
 from employees.models import Employee
 
-# 2. Tkinter GUI Logic
-def add_employee():
-    name = name_entry.get().strip()
-    position = position_entry.get().strip()
 
-    # Input validation
-    if not name or not position:
-        messagebox.showwarning("Validation Error", "Both Name and Position are required!")
-        return
+class EmployeeApp:
+    COLUMNS = [
+        ("ID", 45), ("Name", 140), ("Position", 120), ("Department", 100),
+        ("Email", 170), ("Phone", 100), ("Salary", 90), ("Status", 70), ("Date Hired", 120),
+    ]
 
-    # Save record to Django ORM
-    Employee.objects.create(name=name, position=position)
-    
-    # Clear input fields
-    name_entry.delete(0, tk.END)
-    position_entry.delete(0, tk.END)
-    
-    messagebox.showinfo("Success", f"Employee '{name}' added successfully!")
-    refresh_employee_list()
+    def __init__(self, root):
+        self.root = root
+        root.title("Employee Management System")
+        root.geometry("1250x600")
+        root.minsize(1000, 500)
 
-def refresh_employee_list():
-    # Clear existing rows in treeview
-    for row in tree.get_children():
-        tree.delete(row)
-        
-    # Fetch all records from Django ORM database
-    for emp in Employee.objects.all():
-        tree.insert("", tk.END, values=(emp.id, emp.name, emp.position, emp.date_hired.strftime("%Y-%m-%d %H:%M")))
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview", rowheight=26, font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"))
+        style.configure("Add.TButton", background="#2e7d32", foreground="white")
+        style.configure("Del.TButton", background="#c62828", foreground="white")
+        style.map("Add.TButton", background=[("active", "#388e3c")])
+        style.map("Del.TButton", background=[("active", "#d32f2f")])
 
-# Setup Window
-root = tk.Tk()
-root.title("Employee Management System")
-root.geometry("550x400")
+        self.show_inactive = tk.BooleanVar(value=False)
+        self.search_var = tk.StringVar()
+        self.id_var = tk.StringVar()
 
-# Form Inputs
-frame = tk.Frame(root, padx=10, pady=10)
-frame.pack(fill="x")
+        self.build_form()
+        self.build_table_area()
+        self.refresh()
 
-tk.Label(frame, text="Name:").grid(row=0, column=0, sticky="w", pady=2)
-name_entry = tk.Entry(frame, width=30)
-name_entry.grid(row=0, column=1, pady=2)
+    # ---------- Layout ----------
+    def build_form(self):
+        form = ttk.LabelFrame(self.root, text="New Employee", padding=12)
+        form.pack(side="left", fill="y", padx=10, pady=10)
 
-tk.Label(frame, text="Position:").grid(row=1, column=0, sticky="w", pady=2)
-position_entry = tk.Entry(frame, width=30)
-position_entry.grid(row=1, column=1, pady=2)
+        self.entries = {}
+        fields = [("Name", "name"), ("Position", "position"),
+                  ("Email", "email"), ("Phone", "phone"), ("Salary", "salary")]
+        row = 0
+        for label, key in fields:
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            entry = ttk.Entry(form, width=28)
+            entry.grid(row=row, column=1, pady=4, padx=(8, 0))
+            self.entries[key] = entry
+            row += 1
 
-add_btn = tk.Button(frame, text="Add Employee", command=add_employee, bg="#4CAF50", fg="white")
-add_btn.grid(row=2, column=0, columnspan=2, pady=10)
+        ttk.Label(form, text="Department").grid(row=row, column=0, sticky="w", pady=4)
+        self.dept_combo = ttk.Combobox(form, values=Employee.DEPARTMENTS,
+                                       state="readonly", width=25)
+        self.dept_combo.current(0)
+        self.dept_combo.grid(row=row, column=1, pady=4, padx=(8, 0))
+        row += 1
 
-# Display List (Treeview)
-tree = ttk.Treeview(root, columns=("ID", "Name", "Position", "Date Hired"), show="headings")
-tree.heading("ID", text="ID")
-tree.heading("Name", text="Name")
-tree.heading("Position", text="Position")
-tree.heading("Date Hired", text="Date Hired")
+        ttk.Button(form, text="Add Employee", style="Add.TButton",
+                   command=self.add_employee).grid(row=row, column=0, columnspan=2,
+                                                   sticky="ew", pady=(14, 4))
+        ttk.Button(form, text="Clear", command=self.clear_form).grid(
+            row=row + 1, column=0, columnspan=2, sticky="ew")
 
-tree.column("ID", width=40)
-tree.column("Name", width=150)
-tree.column("Position", width=150)
-tree.column("Date Hired", width=150)
+    def build_table_area(self):
+        right = ttk.Frame(self.root)
+        right.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=10)
 
-tree.pack(padx=10, pady=10, fill="both", expand=True)
+        ttk.Label(right, text="Employees", style="Title.TLabel").pack(anchor="w")
 
-# Initial load of records
-refresh_employee_list()
+        # Search + filter bar
+        bar = ttk.Frame(right)
+        bar.pack(fill="x", pady=6)
+        ttk.Label(bar, text="Search:").pack(side="left")
+        search = ttk.Entry(bar, textvariable=self.search_var, width=30)
+        search.pack(side="left", padx=6)
+        search.bind("<KeyRelease>", lambda e: self.refresh())
+        ttk.Checkbutton(bar, text="Show inactive", variable=self.show_inactive,
+                        command=self.refresh).pack(side="left", padx=10)
+        self.count_label = ttk.Label(bar, text="")
+        self.count_label.pack(side="right")
 
-root.mainloop()
+        # Table
+        wrap = ttk.Frame(right)
+        wrap.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(wrap, columns=[c for c, _ in self.COLUMNS],
+                                 show="headings", selectmode="browse")
+        for col, width in self.COLUMNS:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.tag_configure("inactive", foreground="#9e9e9e")
+        self.tree.tag_configure("odd", background="#f5f5f5")
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+        # Delete / restore by ID
+        actions = ttk.LabelFrame(right, text="Delete / Restore by ID", padding=8)
+        actions.pack(fill="x", pady=(8, 0))
+        ttk.Label(actions, text="Employee ID:").pack(side="left")
+        ttk.Entry(actions, textvariable=self.id_var, width=10).pack(side="left", padx=6)
+        ttk.Button(actions, text="Delete (soft)", style="Del.TButton",
+                   command=self.delete_by_id).pack(side="left", padx=4)
+        ttk.Button(actions, text="Restore",
+                   command=self.restore_by_id).pack(side="left", padx=4)
+
+    # ---------- Actions ----------
+    def add_employee(self):
+        name = self.entries["name"].get().strip()
+        position = self.entries["position"].get().strip()
+        email = self.entries["email"].get().strip()
+        phone = self.entries["phone"].get().strip()
+        salary_text = self.entries["salary"].get().strip() or "0"
+
+        if not name or not position:
+            messagebox.showwarning("Validation Error", "Name and Position are required.")
+            return
+        if email and ("@" not in email or "." not in email):
+            messagebox.showwarning("Validation Error", "Please enter a valid email.")
+            return
+        try:
+            salary = Decimal(salary_text)
+            if salary < 0:
+                raise InvalidOperation
+        except InvalidOperation:
+            messagebox.showwarning("Validation Error", "Salary must be a positive number.")
+            return
+
+        Employee.objects.create(
+            name=name, position=position, email=email, phone=phone,
+            department=self.dept_combo.get(), salary=salary,
+        )
+        self.clear_form()
+        self.refresh()
+        messagebox.showinfo("Success", f"Employee '{name}' added.")
+
+    def _get_employee_from_id(self):
+        text = self.id_var.get().strip()
+        if not text.isdigit():
+            messagebox.showwarning("Invalid ID", "Enter a numeric employee ID.")
+            return None
+        try:
+            return Employee.objects.get(pk=int(text))
+        except Employee.DoesNotExist:
+            messagebox.showerror("Not found", f"No employee with ID {text}.")
+            return None
+
+    def delete_by_id(self):
+        emp = self._get_employee_from_id()
+        if not emp:
+            return
+        if not emp.is_available:
+            messagebox.showinfo("Already inactive", f"{emp.name} is already deleted.")
+            return
+        if messagebox.askyesno("Confirm", f"Soft delete #{emp.id} - {emp.name}?"):
+            emp.soft_delete()
+            self.id_var.set("")
+            self.refresh()
+
+    def restore_by_id(self):
+        emp = self._get_employee_from_id()
+        if not emp:
+            return
+        if emp.is_available:
+            messagebox.showinfo("Already active", f"{emp.name} is already active.")
+            return
+        emp.restore()
+        self.id_var.set("")
+        self.refresh()
+
+    # ---------- Helpers ----------
+    def on_select(self, _event):
+        selected = self.tree.selection()
+        if selected:
+            self.id_var.set(self.tree.item(selected[0])["values"][0])
+
+    def clear_form(self):
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+        self.dept_combo.current(0)
+
+    def refresh(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        qs = Employee.objects.all()
+        if not self.show_inactive.get():
+            qs = qs.filter(is_available=True)
+        term = self.search_var.get().strip()
+        if term:
+            qs = qs.filter(
+                Q(name__icontains=term) | Q(position__icontains=term) |
+                Q(email__icontains=term) | Q(department__icontains=term)
+            )
+
+        for i, emp in enumerate(qs):
+            tags = []
+            if i % 2:
+                tags.append("odd")
+            if not emp.is_available:
+                tags.append("inactive")
+            self.tree.insert("", tk.END, tags=tags, values=(
+                emp.id, emp.name, emp.position, emp.department, emp.email,
+                emp.phone, f"{emp.salary:,.2f}",
+                "Active" if emp.is_available else "Inactive",
+                emp.date_hired.strftime("%Y-%m-%d"),
+            ))
+        self.count_label.config(text=f"{qs.count()} record(s)")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    EmployeeApp(root)
+    root.mainloop()
